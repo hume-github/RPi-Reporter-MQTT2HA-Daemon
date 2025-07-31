@@ -372,8 +372,8 @@ def getDaemonReleases():
         print_line('- RQST daemon_version_list=({})'.format(daemon_version_list), debug=True)
         daemon_last_fetch_time = time()    # record when we last fetched the versions
 
+# getDaemonReleases() # and load them!
 
-getDaemonReleases()  # and load them!
 print_line('* daemon_last_fetch_time=({})'.format(daemon_last_fetch_time), debug=True)
 
 
@@ -558,10 +558,13 @@ def getDeviceModel():
     global rpi_model
     global rpi_model_raw
     global rpi_connections
-    stdout, _, returncode = invoke_shell_cmd("/bin/cat /proc/device-tree/model | /bin/sed -e 's/\\x0//g'")
-    rpi_model_raw = 'N/A'
-    if not returncode:
-        rpi_model_raw = stdout.decode('utf-8')
+    out = subprocess.Popen("/usr/bin/grep 'model name' /proc/cpuinfo | cut -f2- -d: | sort | uniq",
+                           shell=True,
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT)
+    stdout, _ = out.communicate()
+    rpi_model_raw = stdout.decode('utf-8')
+
     # now reduce string length (just more compact, same info)
     rpi_model = rpi_model_raw.replace('Raspberry ', 'R').replace(
         'i Model ', 'i 1 Model').replace('Rev ', 'r').replace(' Plus ', '+')
@@ -682,7 +685,7 @@ def getUptime():
 
 
 def getNetworkIFsUsingIP(ip_cmd):
-    cmd_str = '{} link show | /bin/egrep -v "link" | /bin/egrep " eth| wlan"'.format(
+    cmd_str = '{} link show | /bin/egrep -v "link" | /bin/egrep " eth| wlan| ens"'.format(
         ip_cmd)
     stdout, _, returncode = invoke_shell_cmd(cmd_str)
     lines = []
@@ -1894,10 +1897,7 @@ try:
     while True:
         #  our INTERVAL timer does the work
         sleep(10000)
-
-        timeNow = time()
-        if timeNow > daemon_last_fetch_time + kVersionCheckIntervalInSeconds:
-            getDaemonReleases()  # and load them!
+        timeNow = time.time()
 
         if apt_available:
             if timeNow > update_last_fetch_time + kUpdateCheckIntervalInSeconds:
