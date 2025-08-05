@@ -321,8 +321,8 @@ rpi_uptime = ''
 rpi_uptime_sec = 0
 rpi_last_update_date = datetime.min
 # rpi_last_update_date_v2 = datetime.min
-rpi_filesystem_space = ''
-rpi_filesystem_percent = ''
+rpi_filesystem_space = 0
+rpi_filesystem_percent = 0
 rpi_system_temp = ''
 rpi_gpu_temp = ''
 rpi_cpu_temp = ''
@@ -1357,10 +1357,9 @@ def send_status(timestamp, nothing):
             microsecond=0).isoformat()
     else:
         rpiData[K_RPI_DATE_LAST_UPDATE] = ''
-    rpiData[K_RPI_FS_SPACE] = int (rpi_filesystem_space)
-    # TODO: consider eliminating K_RPI_FS_AVAIL/fs_free_prcnt as used is needed but free is not... (can be calculated)
-    rpiData[K_RPI_FS_AVAIL] = 100 - int(rpi_filesystem_percent, 10)
-    rpiData[K_RPI_FS_USED] = int(rpi_filesystem_percent, 10)
+    rpiData[K_RPI_FS_SPACE] = rpi_filesystem_space
+    rpiData[K_RPI_FS_AVAIL] = 100 - rpi_filesystem_percent
+    rpiData[K_RPI_FS_USED] = rpi_filesystem_percent
 
     rpiData[K_RPI_NETWORK] = getNetworkDictionary()
 
