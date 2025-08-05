@@ -30,7 +30,7 @@ import psutil
 import platform
 signal(SIGPIPE, SIG_DFL)
 
-debug_only = True
+debug_only = False
 apt_available = True
 try:
     import apt
@@ -690,6 +690,7 @@ def getNetworkIFs():
 
 def getFileSystemDrives():
     global rpi_filesystem
+    global rpi_filesystem_space
     tmpDrives = []
 
     # psutil's disk_partitions will naturally skip non-storage filesystem types
@@ -701,6 +702,8 @@ def getFileSystemDrives():
         t_gb = round (u.total / (1024 ** 3))
         fs_util = round (u.percent)
         tmpDrives.append ((t_gb, fs_util, i.mountpoint, i.device))
+        if i.mountpoint == '/':
+            rpi_filesystem_space = t_gb
 
     rpi_filesystem = tmpDrives
     print_line('rpi_filesystem=[{}]'.format(rpi_filesystem), debug=True)
@@ -1352,7 +1355,7 @@ def send_status(timestamp, nothing):
             microsecond=0).isoformat()
     else:
         rpiData[K_RPI_DATE_LAST_UPDATE] = ''
-    rpiData[K_RPI_FS_SPACE] = int(rpi_filesystem_space.replace('GB', ''), 10)
+    rpiData[K_RPI_FS_SPACE] = int (rpi_filesystem_space)
     # TODO: consider eliminating K_RPI_FS_AVAIL/fs_free_prcnt as used is needed but free is not... (can be calculated)
     rpiData[K_RPI_FS_AVAIL] = 100 - int(rpi_filesystem_percent, 10)
     rpiData[K_RPI_FS_USED] = int(rpi_filesystem_percent, 10)
