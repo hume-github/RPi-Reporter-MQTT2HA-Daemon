@@ -691,6 +691,7 @@ def getNetworkIFs():
 def getFileSystemDrives():
     global rpi_filesystem
     global rpi_filesystem_space
+    global rpi_filesystem_percent
     tmpDrives = []
 
     # psutil's disk_partitions will naturally skip non-storage filesystem types
@@ -704,6 +705,7 @@ def getFileSystemDrives():
         tmpDrives.append ((t_gb, fs_util, i.mountpoint, i.device))
         if i.mountpoint == '/':
             rpi_filesystem_space = t_gb
+            rpi_filesystem_percent = fs_util
 
     rpi_filesystem = tmpDrives
     print_line('rpi_filesystem=[{}]'.format(rpi_filesystem), debug=True)
