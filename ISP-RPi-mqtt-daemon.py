@@ -26,15 +26,18 @@ from unidecode import unidecode
 import paho.mqtt.client as mqtt
 import sdnotify
 from signal import signal, SIGPIPE, SIG_DFL
+import psutil
+import platform
 signal(SIGPIPE, SIG_DFL)
 
+debug_only = True
 apt_available = True
 try:
     import apt
 except ImportError:
     apt_available = False
 
-script_version = "1.9.x"
+script_version = "2.0.x"
 script_name = 'ISP-RPi-mqtt-daemon.py'
 script_info = '{} v{}'.format(script_name, script_version)
 project_name = 'RPi Reporter MQTT2HA Daemon'
@@ -59,12 +62,12 @@ if False:
 # Argparse
 opt_debug = False
 opt_verbose = False
+os_release_file = '/etc/os-release'
 
 # Systemd Service Notifications - https://github.com/bb4242/sdnotify
 sd_notifier = sdnotify.SystemdNotifier()
 
 # Logging function
-
 
 def print_line(text, error=False, warning=False, info=False, verbose=False, debug=False, console=True, sd_notify=False):
     timestamp = strftime('%Y-%m-%d %H:%M:%S', localtime())
@@ -94,24 +97,6 @@ def print_line(text, error=False, warning=False, info=False, verbose=False, debu
         sd_notifier.notify(
             'STATUS={} - {}.'.format(timestamp_sd, unidecode(text)))
 
-# Identifier cleanup
-
-
-def clean_identifier(name):
-    clean = name.strip()
-    for this, that in [
-        [' ', '-'],
-        ['ä', 'ae'],
-        ['Ä', 'Ae'],
-        ['ö', 'oe'],
-        ['Ö', 'Oe'],
-        ['ü', 'ue'],
-        ['Ü', 'Ue'],
-            ['ß', 'ss']]:
-        clean = clean.replace(this, that)
-    clean = unidecode(clean)
-    return clean
-
 
 # Argparse
 parser = argparse.ArgumentParser(
@@ -126,10 +111,10 @@ parser.add_argument("-c", '--config_dir',
                     help='set directory where config.ini is located', default=sys.path[0])
 parse_args = parser.parse_args()
 
-config_dir = parse_args.config_dir
-opt_debug = parse_args.debug
+config_dir  = parse_args.config_dir
+opt_debug   = parse_args.debug
 opt_verbose = parse_args.verbose
-opt_stall = parse_args.stall
+opt_stall   = parse_args.stall
 
 print_line('--------------------------------------------------------------------', debug=True)
 print_line(script_info, info=True)
@@ -207,46 +192,22 @@ def on_subscribe(client, userdata, mid, granted_qos):
     print_line('on_subscribe() - {} - {}'.format(str(mid), str(granted_qos)), debug=True, sd_notify=True)
 
 
-shell_cmd_fspec = ''
-
-
 def on_message(client, userdata, message):
-    global shell_cmd_fspec
-    if shell_cmd_fspec == '':
-        shell_cmd_fspec = getShellCmd()
-        if shell_cmd_fspec == '':
-            print_line('* Failed to locate shell Command!', error=True)
-            # kill main thread
-            os._exit(1)
-
-    decoded_payload = message.payload.decode('utf-8')
     command = message.topic.split('/')[-1]
     print_line('on_message() Topic=[{}] payload=[{}] command=[{}]'.format(
         message.topic, message.payload, command), console=True, sd_notify=True, debug=True)
 
-    if command != 'status':
-        if command in commands:
-            print_line('- Command "{}" Received - Run {} {} -'.format(command,
-                       commands[command], decoded_payload), console=True, debug=True)
-            pHandle = subprocess.Popen([shell_cmd_fspec, "-c", commands[command].format(decoded_payload)])
-            output, errors = pHandle.communicate()
-            if errors or pHandle.returncode:
-                print_line('- Command exec says: errors=[{}]'.format(errors or output), console=True, debug=True)
-        else:
-            print_line('* Invalid Command received.', error=True)
-
 
 # -----------------------------------------------------------------------------
 # Load configuration file
-config = ConfigParser(delimiters=(
-    '=', ), inline_comment_prefixes=('#'), interpolation=None)
+
+config = ConfigParser(delimiters=('=', ), inline_comment_prefixes=('#'), interpolation=None)
 config.optionxform = str
 try:
     with open(os.path.join(config_dir, 'config.ini')) as config_file:
         config.read_file(config_file)
 except IOError:
-    print_line('No configuration file "config.ini"',
-               error=True, sd_notify=True)
+    print_line('No configuration file "config.ini"', error=True, sd_notify=True)
     sys.exit(1)
 
 daemon_enabled = config['Daemon'].getboolean('enabled', True)
@@ -325,57 +286,6 @@ print_line('Configuration accepted', console=False, sd_notify=True)
 # -----------------------------------------------------------------------------
 
 daemon_version_list = ['NOT-LOADED']
-daemon_last_fetch_time = 0.0
-
-
-def getDaemonReleases():
-    # retrieve latest formal release versions list from repo
-    global daemon_version_list
-    global daemon_last_fetch_time
-
-    newVersionList = []
-    latestVersion = ''
-
-    daemon_version_list = ['NOT-LOADED']  # mark as NOT fetched
-    error = False
-    try:
-        response = requests.request('GET', 'http://kz0q.com/daemon-releases', verify=False, timeout=10)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as exc:
-        print_line('- getDaemonReleases() RQST exception=({})'.format(exc), error=True)
-        error = True
-
-    if not error:
-        content = response.text
-        lines = content.split('\n')
-        for line in lines:
-            if len(line) > 0:
-                # print_line('- RLS Line=[{}]'.format(line), debug=True)
-                lineParts = line.split(' ')
-                # print_line('- RLS lineParts=[{}]'.format(lineParts), debug=True)
-                if len(lineParts) >= 2:
-                    currVersion = lineParts[0]
-                    rlsType = lineParts[1]
-                    if not currVersion in newVersionList:
-                        if not 'latest' in rlsType.lower():
-                            newVersionList.append(currVersion)  # append to list
-                        else:
-                            latestVersion = currVersion
-
-        if len(newVersionList) > 1:
-            newVersionList.sort()
-        if len(latestVersion) > 0:
-            if not latestVersion in newVersionList:
-                newVersionList.insert(0, latestVersion)  # append to list
-
-        daemon_version_list = newVersionList
-        print_line('- RQST daemon_version_list=({})'.format(daemon_version_list), debug=True)
-        daemon_last_fetch_time = time()    # record when we last fetched the versions
-
-# getDaemonReleases() # and load them!
-
-print_line('* daemon_last_fetch_time=({})'.format(daemon_last_fetch_time), debug=True)
-
 
 # -----------------------------------------------------------------------------
 #  Command invocation thru shell
@@ -407,12 +317,10 @@ rpi_hostname = ''
 rpi_fqdn = ''
 rpi_linux_release = ''
 rpi_linux_version = ''
-rpi_uptime_raw = ''
 rpi_uptime = ''
 rpi_uptime_sec = 0
 rpi_last_update_date = datetime.min
 # rpi_last_update_date_v2 = datetime.min
-rpi_filesystem_space_raw = ''
 rpi_filesystem_space = ''
 rpi_filesystem_percent = ''
 rpi_system_temp = ''
@@ -420,6 +328,7 @@ rpi_gpu_temp = ''
 rpi_cpu_temp = ''
 rpi_mqtt_script = script_info
 rpi_interfaces = []
+rpi_ifstats_last = None
 rpi_filesystem = []
 # Tuple (Total, Free, Avail., Swap Total, Swap Free)
 rpi_memory_tuple = ''
@@ -443,42 +352,23 @@ previous_time = time()
 #  monitor variable fetch routines
 #
 
-
 def getDeviceCpuInfo():
     global rpi_cpu_tuple
-    #  cat /proc/cpuinfo | /bin/egrep -i "processor|model|bogo|hardware|serial"
-    # MULTI-CORE
-    #  processor	: 0
-    #  model name	: ARMv7 Processor rev 4 (v7l)
-    #  BogoMIPS	: 38.40
-    #  processor	: 1
-    #  model name	: ARMv7 Processor rev 4 (v7l)
-    #  BogoMIPS	: 38.40
-    #  processor	: 2
-    #  model name	: ARMv7 Processor rev 4 (v7l)
-    #  BogoMIPS	: 38.40
-    #  processor	: 3
-    #  model name	: ARMv7 Processor rev 4 (v7l)
-    #  BogoMIPS	: 38.40
-    #  Hardware	: BCM2835
-    #  Serial		: 00000000a8d11642
-    #
-    # SINGLE CORE
-    #  processor	: 0
-    #  model name	: ARMv6-compatible processor rev 7 (v6l)
-    #  BogoMIPS	: 697.95
-    #  Hardware	: BCM2835
-    #  Serial		: 00000000131030c0
-    #  Model		: Raspberry Pi Zero W Rev 1.1
-    stdout, _, returncode = invoke_shell_cmd("cat /proc/cpuinfo | /bin/egrep -i 'processor|model|bogo|hardware|serial'")
-    print_line('getDvcCPUinfo() stdout=[{}], retCode=({})'.format(stdout, returncode), debug=True)
-    lines = []
-    if not returncode:
-        lines = stdout.decode('utf-8').split("\n")
-    trimmedLines = []
-    for currLine in lines:
-        trimmedLine = currLine.lstrip().rstrip()
-        trimmedLines.append(trimmedLine)
+
+    trimmedLines    = []
+    cpure           = re.compile ('(?i)processor|model|bogo|hardware|serial')
+
+    with open ('/proc/cpuinfo', 'r') as ci:
+        l = ci.readline ()
+
+        while l:
+            l = l.strip ()
+            m = cpure.match (l)
+            if m:
+                trimmedLines.append (l)
+            l = ci.readline ()
+    ci.close ()
+
     cpu_hardware = ''   # 'hardware'
     cpu_cores = 0       # count of 'processor' lines
     cpu_model = ''      # 'model name'
@@ -500,15 +390,12 @@ def getDeviceCpuInfo():
         if 'Serial' in currLine:
             cpu_serial = currValue
 
-    stdout, _, returncode = invoke_shell_cmd('/bin/cat /proc/loadavg')
-    print_line('getDvcCPUinfo() stdout=[{}], retCode=({})'.format(stdout, returncode), debug=True)
-    cpu_loads_raw = [-1.0] * 3
-    if not returncode:
-        cpu_loads_raw = stdout.decode('utf-8').split()
+    cpu_loads_raw = psutil.getloadavg ()
     print_line('cpu_loads_raw=[{}]'.format(cpu_loads_raw), debug=True)
-    cpu_load1 = round(float(float(cpu_loads_raw[0]) / int(cpu_cores) * 100), 1)
-    cpu_load5 = round(float(float(cpu_loads_raw[1]) / int(cpu_cores) * 100), 1)
-    cpu_load15 = round(float(float(cpu_loads_raw[2]) / int(cpu_cores) * 100), 1)
+
+    cpu_load1   = round (cpu_loads_raw[0], 2)
+    cpu_load5   = round (cpu_loads_raw[1], 2)
+    cpu_load15  = round (cpu_loads_raw[2], 2)
 
     # Tuple (Hardware, Model Name, NbrCores, BogoMIPS, Serial)
     rpi_cpu_tuple = (cpu_hardware, cpu_model, cpu_cores,
@@ -518,38 +405,15 @@ def getDeviceCpuInfo():
 
 def getDeviceMemory():
     global rpi_memory_tuple
-    #  $ cat /proc/meminfo | /bin/egrep -i "mem[TFA]"
-    #  MemTotal:         948304 kB
-    #  MemFree:           40632 kB
-    #  MemAvailable:     513332 kB
-    stdout, _, returncode = invoke_shell_cmd('cat /proc/meminfo')
-    lines = []
-    if not returncode:
-        lines = stdout.decode('utf-8').split("\n")
-    trimmedLines = []
-    for currLine in lines:
-        trimmedLine = currLine.lstrip().rstrip()
-        trimmedLines.append(trimmedLine)
-    mem_total = ''
-    mem_free = ''
-    mem_avail = ''
-    swap_total = ''
-    swap_free = ''
-    for currLine in trimmedLines:
-        lineParts = currLine.split()
-        if 'MemTotal' in currLine:
-            mem_total = float(lineParts[1]) / 1024
-        if 'MemFree' in currLine:
-            mem_free = float(lineParts[1]) / 1024
-        if 'MemAvail' in currLine:
-            mem_avail = float(lineParts[1]) / 1024
-        if 'SwapTotal' in currLine:
-            swap_total = float(lineParts[1]) / 1024
-        if 'SwapFree' in currLine:
-            swap_free = float(lineParts[1]) / 1024
+    psmem = psutil.virtual_memory ()
+    psswap = psutil.swap_memory ()
 
-    # Tuple (Total, Free, Avail., Swap Total, Swap Free)
-    # [0]=total, [1]=free, [2]=avail., [3]=swap total, [4]=swap free
+    mem_total = float (psmem.total) / 1024
+    mem_free = float (psmem.free) / 1024
+    mem_avail = float (psmem.available) / 1024
+    swap_total = float (psswap.total) / 1024
+    swap_free = float (psswap.free) / 1024
+
     rpi_memory_tuple = (mem_total, mem_free, mem_avail, swap_total, swap_free)
     print_line('rpi_memory_tuple=[{}]'.format(rpi_memory_tuple), debug=True)
 
@@ -591,35 +455,53 @@ def getDeviceModel():
 
 def getLinuxRelease():
     global rpi_linux_release
-    stdout, _, returncode = invoke_shell_cmd(
-        "/bin/cat /etc/apt/sources.list | /bin/egrep -v '#' | /usr/bin/awk '{ print $3 }' | /bin/sed -e 's/-/ /g' | /usr/bin/cut -f1 -d' ' | /bin/grep . | /usr/bin/sort -u")
+
+    osre    = re.compile ('^VERSION_CODENAME="?([^\"]+)"?$')
+    osstr   = ''
+
+    if os.path.exists(os_release_file):
+        with open (os_release_file, 'r') as ci:
+            l = ci.readline ()
+
+            while l:
+                l = l.strip ()
+                m = osre.match (l)
+
+                if m:
+                    osstr = m.group (1)
+
+                l = ci.readline ()
+
+        ci.close ()
+
     rpi_linux_release = 'N/A'
-    if not returncode:
-        rpi_linux_release = stdout.decode('utf-8').rstrip()
+    if osstr is not None and osstr != '':
+        rpi_linux_release = osstr
     print_line('rpi_linux_release=[{}]'.format(rpi_linux_release), debug=True)
 
 
 def getLinuxVersion():
     global rpi_linux_version
-    stdout, _, returncode = invoke_shell_cmd('/bin/uname -r')
+    v = platform.release()
     rpi_linux_version = 'N/A'
-    if not returncode:
-        rpi_linux_version = stdout.decode('utf-8').rstrip()
+    if v is not None and v != '':
+        rpi_linux_version = v
     print_line('rpi_linux_version=[{}]'.format(rpi_linux_version), debug=True)
 
 
 def getHostnames():
     global rpi_hostname
     global rpi_fqdn
-    stdout, _, returncode = invoke_shell_cmd('/bin/hostname -f')
-    fqdn_from_hostname = stdout.decode('utf-8').rstrip() if not returncode else 'N/A'
+
+    fqdn_from_hostname = socket.getfqdn ()
+
     # Allow overriding the sensor host name via `MQTT_SENSOR_HOSTNAME`
     # environment variable
+
     fqdn_raw = os.environ.get('MQTT_SENSOR_HOSTNAME', fqdn_from_hostname)
     print_line('fqdn_raw=[{}]'.format(fqdn_raw), debug=True)
     rpi_hostname = fqdn_raw
     if '.' in fqdn_raw:
-        # have good fqdn
         nameParts = fqdn_raw.split('.')
         rpi_fqdn = fqdn_raw
         rpi_hostname = nameParts[0]
@@ -635,199 +517,64 @@ def getHostnames():
 
 
 def getUptime():
-    global rpi_uptime_raw
     global rpi_uptime
     global rpi_uptime_sec
-    stdout, _, returncode = invoke_shell_cmd('/usr/bin/uptime')
-    rpi_uptime_raw = 'N/A'
-    if not returncode:
-        rpi_uptime_raw = stdout.decode('utf-8').rstrip().lstrip()
-    print_line('rpi_uptime_raw=[{}]'.format(rpi_uptime_raw), debug=True)
-    basicParts = rpi_uptime_raw.split()
-    timeStamp = basicParts[0]
-    lineParts = rpi_uptime_raw.split(',')
-    if ('user' in lineParts[1]):
-        rpi_uptime_raw = lineParts[0]
-    else:
-        rpi_uptime_raw = '{}, {}'.format(lineParts[0], lineParts[1])
-    rpi_uptime = rpi_uptime_raw.replace(
-        timeStamp, '').lstrip().replace('up ', '')
-    print_line('rpi_uptime=[{}]'.format(rpi_uptime), debug=True)
+
+    rpi_uptime_sec = int (time () - psutil.boot_time ())
+    t = rpi_uptime_sec
+    secsVal = t % 60
+    t -= secsVal
+    t = t / 60  # t is now minutes
+    minsVal = t % 60
+    t -= minsVal
+    t = t / 60 # t is now hours
+    hoursVal = t % 24
+    t -= hoursVal
+    t = t / 24 # t is now days
+    daysVal = t
+
     # Ex: 10 days, 23:57
     # Ex: 27 days, 27 min
     # Ex: 0 min
-    bHasColon = (':' in rpi_uptime)
-    uptimeParts = rpi_uptime.split(',')
-    print_line('- uptimeParts=[{}]'.format(uptimeParts), debug=True)
-    if len(uptimeParts) > 1:
-        # have days and time
-        dayParts = uptimeParts[0].strip().split(' ')
-        daysVal = int(dayParts[0])
-        timeStr = uptimeParts[1].strip()
+
+    timeStr = ''
+
+    if hoursVal == 0:
+        timeStr = f"{minsVal} min"
     else:
-        # have time only
-        daysVal = 0
-        timeStr = uptimeParts[0].strip()
+        timeStr = "%02d:%02d" % (hoursVal, minsVal)
+
     print_line('- days=({}), timeStr=[{}]'.format(daysVal, timeStr), debug=True)
-    if ':' in timeStr:
-        # timeStr = '23:57'
-        timeParts = timeStr.split(':')
-        hoursVal = int(timeParts[0])
-        minsVal = int(timeParts[1])
-    else:
-        # timeStr = 27 of: '27 min'
-        hoursVal = 0
-        timeParts = timeStr.split(' ')
-        minsVal = int(timeParts[0])
     print_line('- hoursVal=({}), minsVal=({})'.format(hoursVal, minsVal), debug=True)
-    rpi_uptime_sec = (minsVal * 60) + (hoursVal * 60 * 60) + (daysVal * 24 * 60 * 60)
     print_line('rpi_uptime_sec=({})'.format(rpi_uptime_sec), debug=True)
 
+    if daysVal == 0:
+        if hoursVal == 0:
+            if minsVal == 0:
+                rpi_uptime = f"{secsVal} sec"
+            else:
+                rpi_uptime = f"{minsVal} min"
+        else:
+            rpi_uptime = timeStr
+    else:
+        if daysVal == 1:
+            rpi_uptime = f"{daysVal} day, {timeStr}"
+        else:
+            rpi_uptime = "%d days, %s" % (daysVal, timeStr)
 
-def getNetworkIFsUsingIP(ip_cmd):
-    cmd_str = '{} link show | /bin/egrep -v "link" | /bin/egrep " eth| wlan| ens"'.format(
-        ip_cmd)
-    stdout, _, returncode = invoke_shell_cmd(cmd_str)
-    lines = []
-    if not returncode:
-        lines = stdout.decode('utf-8').split("\n")
-    interfaceNames = []
-    line_count = len(lines)
-    if line_count > 2:
-        line_count = 2
-    if line_count == 0:
-        print_line('ERROR no lines left by ip(8) filter!', error=True)
-        sys.exit(1)
-
-    for lineIdx in range(line_count):
-        trimmedLine = lines[lineIdx].lstrip().rstrip()
-        if len(trimmedLine) > 0:
-            lineParts = trimmedLine.split()
-            # if interface is within a  container then we have eth0@if77, so
-            # take the leftmost part up to '@' in that case
-            interfaceName = lineParts[1].replace(':', '').split('@')[0]
-            interfaceNames.append(interfaceName)
-
-    print_line('interfaceNames=[{}]'.format(interfaceNames), debug=True)
-
-    trimmedLines = []
-    for interface in interfaceNames:
-        lines = getSingleInterfaceDetails(interface)
-        for currLine in lines:
-            trimmedLines.append(currLine)
-
-    loadNetworkIFDetailsFromLines(trimmedLines)
-
-
-def getSingleInterfaceDetails(interfaceName):
-    cmdString = '/sbin/ifconfig {} | /bin/egrep "Link|flags|inet |ether |TX packets |RX packets "'.format(
-        interfaceName)
-    stdout, _, returncode = invoke_shell_cmd(cmdString)
-    lines = []
-    if not returncode:
-        lines = stdout.decode('utf-8').split("\n")
-    trimmedLines = []
-    for currLine in lines:
-        trimmedLine = currLine.lstrip().rstrip()
-        if len(trimmedLine) > 0:
-            trimmedLines.append(trimmedLine)
-
-    # print_line('interface:[{}] trimmedLines=[{}]'.format(interfaceName, trimmedLines), debug=True)
-    return trimmedLines
-
-
-def loadNetworkIFDetailsFromLines(ifConfigLines):
-    global rpi_interfaces
-    global rpi_mac
-    global previous_time
-    #
-    # OLDER SYSTEMS
-    #  eth0      Link encap:Ethernet  HWaddr b8:27:eb:c8:81:f2
-    #    inet addr:192.168.100.41  Bcast:192.168.100.255  Mask:255.255.255.0
-    #  wlan0     Link encap:Ethernet  HWaddr 00:0f:60:03:e6:dd
-    # NEWER SYSTEMS
-    #  The following means eth0 (wired is NOT connected, and WiFi is connected)
-    #  eth0: flags=4099<UP,BROADCAST,MULTICAST>  mtu 1500
-    #    ether b8:27:eb:1a:f3:bc  txqueuelen 1000  (Ethernet)
-    #    RX packets 0  bytes 0 (0.0 B)
-    #    TX packets 0  bytes 0 (0.0 B)
-    #  wlan0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
-    #    inet 192.168.100.189  netmask 255.255.255.0  broadcast 192.168.100.255
-    #    ether b8:27:eb:4f:a6:e9  txqueuelen 1000  (Ethernet)
-    #    RX packets 1358790  bytes 1197368205 (1.1 GiB)
-    #    TX packets 916361  bytes 150440804 (143.4 MiB)
-    #
-    tmpInterfaces = []
-    haveIF = False
-    imterfc = ''
-    rpi_mac = ''
-    current_time = time()
-    if current_time == previous_time:
-        current_time += 1
-
-    for currLine in ifConfigLines:
-        lineParts = currLine.split()
-        # print_line('- currLine=[{}]'.format(currLine), debug=True)
-        # print_line('- lineParts=[{}]'.format(lineParts), debug=True)
-        if len(lineParts) > 0:
-            # skip interfaces generated by Home Assistant on RPi
-            if 'docker' in currLine or 'veth' in currLine or 'hassio' in currLine:
-                haveIF = False
-                continue
-            # let's evaluate remaining interfaces
-            if 'flags' in currLine:  # NEWER ONLY
-                haveIF = True
-                imterfc = lineParts[0].replace(':', '')
-                # print_line('newIF=[{}]'.format(imterfc), debug=True)
-            # OLDER ONLY, using 'Link ' (notice space) prevent from tripping on
-            # IPv6 ('Scope:Link')
-            elif 'Link ' in currLine:
-                haveIF = True
-                imterfc = lineParts[0].replace(':', '')
-                newTuple = (imterfc, 'mac', lineParts[4])
-                if rpi_mac == '':
-                    rpi_mac = lineParts[4]
-                    print_line('rpi_mac=[{}]'.format(rpi_mac), debug=True)
-                tmpInterfaces.append(newTuple)
-                print_line('newTuple=[{}]'.format(newTuple), debug=True)
-            elif haveIF == True:
-                print_line('IF=[{}], lineParts=[{}]'.format(
-                    imterfc, lineParts), debug=True)
-                if 'inet' in currLine:  # OLDER & NEWER
-                    newTuple = (imterfc, 'IP',
-                                lineParts[1].replace('addr:', ''))
-                    tmpInterfaces.append(newTuple)
-                    print_line('newTuple=[{}]'.format(newTuple), debug=True)
-                elif 'ether' in currLine:  # NEWER ONLY
-                    newTuple = (imterfc, 'mac', lineParts[1])
-                    tmpInterfaces.append(newTuple)
-                    if rpi_mac == '':
-                        rpi_mac = lineParts[1]
-                        print_line('rpi_mac=[{}]'.format(rpi_mac), debug=True)
-                    print_line('newTuple=[{}]'.format(newTuple), debug=True)
-                elif 'RX' in currLine:  # NEWER ONLY
-                    previous_value = getPreviousNetworkData(imterfc, 'rx_data')
-                    current_value = int(lineParts[4])
-                    rx_data = round((current_value - previous_value) / (current_time - previous_time) * 8 / 1024)
-                    newTuple = (imterfc, 'rx_data', rx_data)
-                    tmpInterfaces.append(newTuple)
-                    print_line('newTuple=[{}]'.format(newTuple), debug=True)
-                elif 'TX' in currLine:  # NEWER ONLY
-                    previous_value = getPreviousNetworkData(imterfc, 'tx_data')
-                    current_value = int(lineParts[4])
-                    tx_data = round((current_value - previous_value) / (current_time - previous_time) * 8 / 1024)
-                    newTuple = (imterfc, 'tx_data', tx_data)
-                    tmpInterfaces.append(newTuple)
-                    print_line('newTuple=[{}]'.format(newTuple), debug=True)
-                    haveIF = False
-
-    rpi_interfaces = tmpInterfaces
-    print_line('rpi_interfaces=[{}]'.format(rpi_interfaces), debug=True)
-    print_line('rpi_mac=[{}]'.format(rpi_mac), debug=True)
+    print_line('rpi_uptime=({})'.format(rpi_uptime), debug=True)
 
 
 def getPreviousNetworkData(interface, field):
     global rpi_interfaces
+    # TYPICAL:
+    # rpi_interfaces=[[
+    #   ('eth0', 'mac', 'b8:27:eb:1a:f3:bc'),
+    #   ('wlan0', 'IP', '192.168.100.189'),
+    #   ('wlan0', 'tx_data', '383783'),
+    #   ('wlan0', 'mac', 'b8:27:eb:4f:a6:e9')
+    # ]]
+
     value = [item for item in rpi_interfaces if item[0] == interface and item[1] == field]
     if len(value) > 0:
         return value[0][2]
@@ -836,140 +583,127 @@ def getPreviousNetworkData(interface, field):
 
 
 def getNetworkIFs():
-    ip_cmd = getIPCmd()
-    if ip_cmd != '':
-        getNetworkIFsUsingIP(ip_cmd)
-    else:
-        stdout, _, returncode = invoke_shell_cmd(
-            '/sbin/ifconfig | /bin/egrep "Link|flags|inet |ether " | /bin/egrep -v -i "lo:|loopback|inet6|\:\:1|127\.0\.0\.1"')
-        lines = []
-        if not returncode:
-            lines = stdout.decode('utf-8').split("\n")
-        trimmedLines = []
-        for currLine in lines:
-            trimmedLine = currLine.lstrip().rstrip()
-            if len(trimmedLine) > 0:
-                trimmedLines.append(trimmedLine)
+    global rpi_interfaces
+    global rpi_mac
+    global previous_time
+    global rpi_ifstats_last
 
-        print_line('trimmedLines=[{}]'.format(trimmedLines), debug=True)
+    first_mac = ''
+    ifinfo = []
+    # TYPICAL:
+    # rpi_interfaces=[[
+    #   ('eth0', 'mac', 'b8:27:eb:1a:f3:bc'),
+    #   ('wlan0', 'IP', '192.168.100.189'),
+    #   ('wlan0', 'mac', 'b8:27:eb:4f:a6:e9')
+    # ]]
 
-        loadNetworkIFDetailsFromLines(trimmedLines)
+    ifs             = psutil.net_if_addrs ()
+    interesting_ifs = []
 
+    for ifn in ifs.keys ():
+        if ifn.startswith ('eth') or ifn.startswith ('wlan') or ifn.startswith ('ens'):
+            ifAddr = ''
+            ifAddrType = ''
+
+            if ifn not in interesting_ifs:
+                interesting_ifs.append (ifn)
+
+            for snic in ifs[ifn]:
+                if snic.family == socket.AddressFamily.AF_INET:
+                    ifAddrType  = 'IP'
+                    ifAddr      = snic.address
+                elif snic.family == socket.AddressFamily.AF_INET6:
+                    if snic.address.startswith('fe80'):
+                        ifAddr      = ''
+                        ifAddrType  = ''
+                    else:
+                        ifAddrType  = 'IP6'
+                        ifAddr      = snic.address
+                elif snic.family == socket.AddressFamily.AF_PACKET:
+                    ifAddrType  = 'mac'
+                    ifAddr      = snic.address
+
+                    if first_mac == '':
+                        first_mac   = snic.address
+
+                if ifAddr != '' and ifAddrType != '':
+                    i   = (ifn, ifAddrType, ifAddr)
+                    ifinfo.append (i)
+
+    # Now update interface TX/RX stats
+
+    n           = int (time ())
+
+    if n == previous_time:
+            # Somehow we managed to get called within the same second.
+            # Sleep for a second so that isn't true anymore, it's harmless.
+
+            sleep (1000)
+            n   = int (time ())
+
+    secdelta    = n - previous_time
+    ifst        = psutil.net_io_counters (pernic=True, nowrap=True)
+
+    for i in interesting_ifs:
+        nst         = ifst[i]
+
+        o_b_rx  = 0
+        o_b_tx  = 0
+
+        if rpi_ifstats_last is not None:
+            ost     = rpi_ifstats_last[i]
+            o_b_rx  = ost.bytes_recv
+            o_b_tx  = ost.bytes_sent
+
+        bytes_rx    = (nst.bytes_recv - o_b_rx) / secdelta
+        bytes_tx    = (nst.bytes_sent - o_b_tx) / secdelta
+
+        # if RX or TX bytes have *decreased* since last check,
+        # just set them to 0.  pstutil will usually compensate
+        # so we don't see this, but on VERY busy systems we might
+        # still catch it.
+
+        if bytes_rx < 0:
+            bytes_rx    = 0
+        
+        if bytes_tx < 0:
+            bytes_tx    = 0
+
+        # Convert bytes per second to kilobits
+
+        i           = (i, 'tx_data', (bytes_tx * 8 / 1024))
+        ifinfo.append (i)
+
+        i           = (i, 'rx_data', (bytes_rx * 8 / 1024))
+        ifinfo.append (i)
+
+    # Store the stats and time for the next go around.
+
+    rpi_ifstats_last = ifst
+    previous_time = n
+
+    # Store our globals
+
+    rpi_mac         = first_mac
+    rpi_interfaces  = ifs
+    return ifinfo
 
 def getFileSystemDrives():
-    global rpi_filesystem_space_raw
-    global rpi_filesystem_space
-    global rpi_filesystem_percent
     global rpi_filesystem
-    stdout, _, returncode = invoke_shell_cmd("/bin/df -m | /usr/bin/tail -n +2 | /bin/egrep -v 'tmpfs|boot'")
-    lines = []
-    if not returncode:
-        lines = stdout.decode('utf-8').split("\n")
-    trimmedLines = []
-    for currLine in lines:
-        trimmedLine = currLine.lstrip().rstrip()
-        if len(trimmedLine) > 0:
-            trimmedLines.append(trimmedLine)
-
-    print_line('getFileSystemDrives() trimmedLines=[{}]'.format(
-        trimmedLines), debug=True)
-
-    #  EXAMPLES
-    #
-    #  Filesystem     1M-blocks  Used Available Use% Mounted on
-    #  /dev/root          59998   9290     48208  17% /
-    #  /dev/sda1         937872 177420    712743  20% /media/data
-    # or
-    #  /dev/root          59647  3328     53847   6% /
-    #  /dev/sda1           3703    25      3472   1% /media/pi/SANDISK
-    # or
-    #  xxx.xxx.xxx.xxx:/srv/c2db7b94 200561 148655 41651 79% /
-
-    # FAILING Case v1.4.0:
-    # Here is the output of 'df -m'
-
-    # Sys. de fichiers blocs de 1M Utilisé Disponible Uti% Monté sur
-    # /dev/root 119774 41519 73358 37% /
-    # devtmpfs 1570 0 1570 0% /dev
-    # tmpfs 1699 0 1699 0% /dev/shm
-    # tmpfs 1699 33 1667 2% /run
-    # tmpfs 5 1 5 1% /run/lock
-    # tmpfs 1699 0 1699 0% /sys/fs/cgroup
-    # /dev/mmcblk0p1 253 55 198 22% /boot
-    # tmpfs 340 0 340 0% /run/user/1000
-
-    # FAILING Case v1.6.x (issue #61)
-    # [[/bin/df: /mnt/sabrent: No such device or address',
-    #   '/dev/root         119756  19503     95346  17% /',
-    #   '/dev/sda1         953868 882178     71690  93% /media/usb0',
-    #   '/dev/sdb1         976761  93684    883078  10% /media/pi/SSD']]
-
     tmpDrives = []
-    for currLine in trimmedLines:
-        if 'no such device' in currLine.lower():
-            print_line('BAD LINE FORMAT, Skipped=[{}]'.format(currLine), debug=True, warning=True)
-            continue
-        lineParts = currLine.split()
-        print_line('lineParts({})=[{}]'.format(
-            len(lineParts), lineParts), debug=True)
-        if len(lineParts) < 6:
-            print_line('BAD LINE FORMAT, Skipped=[{}]'.format(
-                lineParts), debug=True, warning=True)
-            continue
-        # tuple { total blocks, used%, mountPoint, device }
-        #
-        # new mech:
-        #  Filesystem     1M-blocks  Used Available Use% Mounted on
-        #     [0]           [1]       [2]     [3]    [4]   [5]
-        #     [--]         [n-3]     [n-2]   [n-1]   [n]   [--]
-        #  where  percent_field_index  is 'n'
-        #
 
-        # locate our % used field...
-        for percent_field_index in range(len(lineParts) - 2, 1, -1):
-            if '%' in lineParts[percent_field_index]:
-                break
-        print_line('percent_field_index=[{}]'.format(
-            percent_field_index), debug=True)
+    # psutil's disk_partitions will naturally skip non-storage filesystem types
+    # unless told not to.
+    fs = psutil.disk_partitions ()
 
-        total_size_idx = percent_field_index - 3
-        mount_idx = percent_field_index + 1
-
-        # do we have a two part device name?
-        device = lineParts[0]
-        if total_size_idx != 1:
-            device = '{} {}'.format(lineParts[0], lineParts[1])
-        print_line('device=[{}]'.format(device), debug=True)
-
-        # do we have a two part mount point?
-        mount_point = lineParts[mount_idx]
-        if len(lineParts) - 1 > mount_idx:
-            mount_point = '{} {}'.format(
-                lineParts[mount_idx], lineParts[mount_idx + 1])
-        print_line('mount_point=[{}]'.format(mount_point), debug=True)
-
-        total_size_in_gb = '{:.0f}'.format(
-            next_power_of_2(lineParts[total_size_idx]))
-        newTuple = (total_size_in_gb, lineParts[percent_field_index].replace(
-            '%', ''),  mount_point, device)
-        tmpDrives.append(newTuple)
-        print_line('newTuple=[{}]'.format(newTuple), debug=True)
-        if newTuple[2] == '/':
-            rpi_filesystem_space_raw = currLine
-            rpi_filesystem_space = newTuple[0]
-            rpi_filesystem_percent = newTuple[1]
-            print_line('rpi_filesystem_space=[{}GB]'.format(
-                newTuple[0]), debug=True)
-            print_line('rpi_filesystem_percent=[{}]'.format(
-                newTuple[1]), debug=True)
+    for i in fs:
+        u = psutil.disk_usage (i.mountpoint)
+        t_gb = round (u.total / (1024 ** 3))
+        fs_util = round (u.percent)
+        tmpDrives.append ((t_gb, fs_util, i.mountpoint, i.device))
 
     rpi_filesystem = tmpDrives
     print_line('rpi_filesystem=[{}]'.format(rpi_filesystem), debug=True)
-
-
-def next_power_of_2(size):
-    size_as_nbr = int(size) - 1
-    return 1 if size == 0 else (1 << size_as_nbr.bit_length()) / 1024
 
 
 def getVcGenCmd():
@@ -982,32 +716,6 @@ def getVcGenCmd():
         desiredCommand = ''
     if desiredCommand != '':
         print_line('Found vcgencmd(1)=[{}]'.format(desiredCommand), debug=True)
-    return desiredCommand
-
-
-def getShellCmd():
-    cmd_locn1 = '/usr/bin/sh'
-    cmd_locn2 = '/bin/sh'
-    desiredCommand = cmd_locn1
-    if os.path.exists(desiredCommand) == False:
-        desiredCommand = cmd_locn2
-    if os.path.exists(desiredCommand) == False:
-        desiredCommand = ''
-    if desiredCommand != '':
-        print_line('Found sh(1)=[{}]'.format(desiredCommand), debug=True)
-    return desiredCommand
-
-
-def getIPCmd():
-    cmd_locn1 = '/bin/ip'
-    cmd_locn2 = '/sbin/ip'
-    desiredCommand = ''
-    if os.path.exists(cmd_locn1) == True:
-        desiredCommand = cmd_locn1
-    elif os.path.exists(cmd_locn2) == True:
-        desiredCommand = cmd_locn2
-    if desiredCommand != '':
-        print_line('Found IP(8)=[{}]'.format(desiredCommand), debug=True)
     return desiredCommand
 
 
@@ -1054,16 +762,16 @@ def getSystemTemperature():
 
 def getSystemCPUTemperature():
     cmd_locn1 = '/sys/class/thermal/thermal_zone0/temp'
-    cmdString = '/bin/cat {}'.format(
-        cmd_locn1)
 
     rpi_cpu_temp = float('-1.0')
     if os.path.exists(cmd_locn1):
-        stdout, _, returncode = invoke_shell_cmd(cmdString)
-        if not returncode:
-            rpi_cpu_temp_raw = stdout.decode('utf-8').rstrip()
-            rpi_cpu_temp = float(rpi_cpu_temp_raw) / 1000.0
-    print_line('rpi_cpu_temp=[{}]'.format(rpi_cpu_temp), debug=True)
+        with open (cmd_locn1, 'r') as ci:
+            l = ci.readline ()
+            l = l.strip ()
+            if l is not None and l != '':
+                rpi_cpu_temp = float (l) / 1000.0
+
+            ci.close ()
     return rpi_cpu_temp
 
 
@@ -1153,70 +861,23 @@ def interpretThrottleValue(throttleValue):
 
 def getLastUpdateDate():
     global rpi_last_update_date
-    # apt-get update writes to following dir (so date changes on update)
-    apt_listdir_filespec = '/var/lib/apt/lists/partial'
-    # apt-get dist-upgrade | autoremove update the following file when actions are taken
-    apt_lockdir_filespec = '/var/lib/dpkg/lock'
-    cmdString = '/bin/ls -ltrd {} {}'.format(
-        apt_listdir_filespec, apt_lockdir_filespec)
-    stdout, _, returncode = invoke_shell_cmd(cmdString)
-    lines = []
-    if not returncode:
-        lines = stdout.decode('utf-8').split("\n")
-    trimmedLines = []
-    for currLine in lines:
-        trimmedLine = currLine.lstrip().rstrip()
-        if len(trimmedLine) > 0:
-            trimmedLines.append(trimmedLine)
-    print_line('trimmedLines=[{}]'.format(trimmedLines), debug=True)
 
-    fileSpec_latest = None
-    if len(trimmedLines) > 0:
-        lastLineIdx = len(trimmedLines) - 1
-        lineParts = trimmedLines[lastLineIdx].split()
-        if len(lineParts) > 0:
-            lastPartIdx = len(lineParts) - 1
-            fileSpec_latest = lineParts[lastPartIdx]
-        print_line('fileSpec_latest=[{}]'.format(fileSpec_latest), debug=True)
+    apt_files       = ('/var/lib/apt/lists/partial', '/var/lib/dpkg/lock')
+    fileSpec_latest = 0
+
+    for f in apt_files:
+        if os.path.exists (f):
+            fileModDateInSeconds = os.path.getmtime(f)
+            if fileModDateInSeconds > fileSpec_latest:
+                fileSpec_latest = fileModDateInSeconds
+
 
     rpi_last_update_date = None
-    if fileSpec_latest:
-        fileModDateInSeconds = os.path.getmtime(fileSpec_latest)
+    if fileSpec_latest > 0:
         fileModDate = datetime.fromtimestamp(fileModDateInSeconds)
         rpi_last_update_date = fileModDate.replace(tzinfo=local_tz)
         print_line('rpi_last_update_date=[{}]'.format(
             rpi_last_update_date), debug=True)
-
-
-def to_datetime(time):
-    return datetime.fromordinal(int(time)) + datetime.timedelta(time % 1)
-
-
-def getLastInstallDate():
-    global rpi_last_update_date
-    # apt_log_filespec = '/var/log/dpkg.log'
-    # apt_log_filespec2 = '/var/log/dpkg.log.1'
-    stdout, _, returncode = invoke_shell_cmd(
-        "/bin/grep --binary-files=text 'status installed' /var/log/dpkg.log /var/log/dpkg.log.1 2>/dev/null | sort | tail -1")
-    last_installed_pkg_raw = ''
-    if not returncode:
-        last_installed_pkg_raw = stdout.decode(
-            'utf-8').rstrip().replace('/var/log/dpkg.log:', '').replace('/var/log/dpkg.log.1:', '')
-    print_line('last_installed_pkg_raw=[{}]'.format(
-        last_installed_pkg_raw), debug=True)
-    line_parts = last_installed_pkg_raw.split()
-    if len(line_parts) > 1:
-        pkg_date_string = '{} {}'.format(line_parts[0], line_parts[1])
-        print_line('pkg_date_string=[{}]'.format(pkg_date_string), debug=True)
-        # Example:
-        #   2020-07-22 17:08:26 status installed python3-tzlocal:all 1.3-1
-
-        pkg_install_date = datetime.strptime(
-            pkg_date_string, '%Y-%m-%d %H:%M:%S').replace(tzinfo=local_tz)
-        rpi_last_update_date = pkg_install_date
-
-    print_line('rpi_last_update_date=[{}]'.format(
-        rpi_last_update_date), debug=True)
 
 
 update_last_fetch_time = 0.0
@@ -1232,7 +893,6 @@ def getNumberOfAvailableUpdates():
         changes = cache.get_changes()
         print_line('APT changes=[{}]'.format(changes), debug=True)
         print_line('APT Avail Updates: ({})'.format(len(changes)), info=True)
-        # return str(cache.get_changes().len())
         rpi_update_count = len(changes)
         update_last_fetch_time = time()
 
@@ -1247,6 +907,7 @@ getDeviceCpuInfo()
 getLinuxRelease()
 getLinuxVersion()
 getFileSystemDrives()
+
 if apt_available:
     getNumberOfAvailableUpdates()
 
@@ -1265,14 +926,18 @@ K_ALIVE_TIMOUT_IN_SECONDS = 60
 
 def publishAliveStatus():
     print_line('- SEND: yes, still alive -', debug=True)
-    mqtt_client.publish(lwt_sensor_topic, payload=lwt_online_val, retain=False)
-    mqtt_client.publish(lwt_command_topic, payload=lwt_online_val, retain=False)
+
+    if debug_only == False:
+        mqtt_client.publish(lwt_sensor_topic, payload=lwt_online_val, retain=False)
+        mqtt_client.publish(lwt_command_topic, payload=lwt_online_val, retain=False)
 
 
 def publishShuttingDownStatus():
     print_line('- SEND: shutting down -', debug=True)
-    mqtt_client.publish(lwt_sensor_topic, payload=lwt_offline_val, retain=False)
-    mqtt_client.publish(lwt_command_topic, payload=lwt_offline_val, retain=False)
+
+    if debug_only == False:
+        mqtt_client.publish(lwt_sensor_topic, payload=lwt_offline_val, retain=False)
+        mqtt_client.publish(lwt_command_topic, payload=lwt_offline_val, retain=False)
 
 
 def aliveTimeoutHandler():
@@ -1368,8 +1033,9 @@ except:
                error=True, sd_notify=True)
     sys.exit(1)
 else:
-    mqtt_client.publish(lwt_sensor_topic, payload=lwt_online_val, retain=False)
-    mqtt_client.publish(lwt_command_topic, payload=lwt_online_val, retain=False)
+    if debug_only == False:
+        mqtt_client.publish(lwt_sensor_topic, payload=lwt_online_val, retain=False)
+        mqtt_client.publish(lwt_command_topic, payload=lwt_online_val, retain=False)
     mqtt_client.loop_start()
 
     while mqtt_client_connected == False:  # wait in loop
@@ -1551,9 +1217,10 @@ for [sensor, params] in detectorValues.items():
         payload['dev'] = {
             'identifiers': ["{}".format(uniqID)],
         }
-    mqtt_client.publish(discovery_topic, json.dumps(payload), 1, retain=True)
 
-    # remove connections as test:                  'connections' : [["mac", mac.lower()], [interface, ipaddr]],
+    if debug_only == False:
+        print_line ('- Publishing json - [{}]'.format(payload), debug=True)
+        mqtt_client.publish(discovery_topic, json.dumps(payload), 1, retain=True)
 
 # -----------------------------------------------------------------------------
 #  timer and timer funcs for period handling
@@ -1811,7 +1478,7 @@ def getCPUDictionary():
     # TYPICAL:
     #   Tuple (Hardware, Model Name, NbrCores, BogoMIPS, Serial)
     cpuDict = OrderedDict()
-    # print_line('rpi_cpu_tuple:{}"'.format(rpi_cpu_tuple), debug=True)
+    print_line('rpi_cpu_tuple:{}"'.format(rpi_cpu_tuple), debug=True)
     if rpi_cpu_tuple != '':
         cpuDict[K_RPI_CPU_HARDWARE] = rpi_cpu_tuple[0]
         cpuDict[K_RPI_CPU_MODEL] = rpi_cpu_tuple[1]
@@ -1826,15 +1493,13 @@ def getCPUDictionary():
 
 
 def publishMonitorData(latestData, topic):
-    print_line('Publishing to MQTT topic "{}, Data:{}"'.format(
-        topic, json.dumps(latestData)))
-    mqtt_client.publish('{}'.format(topic), json.dumps(
-        latestData), 1, retain=False)
+    print_line('Publishing to MQTT topic "{}, Data:{}"'.format(topic, json.dumps(latestData)))
+    if debug_only == False:
+        mqtt_client.publish('{}'.format(topic), json.dumps(latestData), 1, retain=False)
     sleep(0.5)  # some slack for the publish roundtrip and callback function
 
 
 def update_values():
-    # run get latest values for all
     getDeviceCpuInfo()
     getUptime()
     getFileSystemDrives()
@@ -1844,10 +1509,9 @@ def update_values():
     getDeviceMemory()
     getNetworkIFs()
 
+
 # -----------------------------------------------------------------------------
-
 # Interrupt handler
-
 
 def handle_interrupt(channel):
     global reported_first_time
@@ -1876,15 +1540,6 @@ def afterMQTTConnect():
     # do our first report
     handle_interrupt(0)
 
-# TESTING AGAIN
-# getNetworkIFs()
-# getLastUpdateDate()
-
-# TESTING, early abort
-# stopAliveTimer()
-# exit(0)
-
-
 afterMQTTConnect()  # now instead of after?
 
 # check every 12 hours (twice a day) = 12 hours * 60 minutes * 60 seconds
@@ -1897,7 +1552,7 @@ try:
     while True:
         #  our INTERVAL timer does the work
         sleep(10000)
-        timeNow = time.time()
+        timeNow = time()
 
         if apt_available:
             if timeNow > update_last_fetch_time + kUpdateCheckIntervalInSeconds:
