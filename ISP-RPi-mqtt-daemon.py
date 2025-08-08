@@ -28,6 +28,7 @@ import sdnotify
 from signal import signal, SIGPIPE, SIG_DFL
 import psutil
 import platform
+import pprint
 signal(SIGPIPE, SIG_DFL)
 
 debug_only = False
@@ -671,11 +672,11 @@ def getNetworkIFs():
 
         # Convert bytes per second to kilobits
 
-        i           = (i, 'tx_data', (bytes_tx * 8 / 1024))
-        ifinfo.append (i)
+        j           = (i, 'tx_data', (bytes_tx * 8 / 1024))
+        ifinfo.append (j)
 
-        i           = (i, 'rx_data', (bytes_rx * 8 / 1024))
-        ifinfo.append (i)
+        j           = (i, 'rx_data', (bytes_rx * 8 / 1024))
+        ifinfo.append (j)
 
     # Store the stats and time for the next go around.
 
@@ -685,7 +686,7 @@ def getNetworkIFs():
     # Store our globals
 
     rpi_mac         = first_mac
-    rpi_interfaces  = ifs
+    rpi_interfaces  = ifinfo
     return ifinfo
 
 def getFileSystemDrives():
